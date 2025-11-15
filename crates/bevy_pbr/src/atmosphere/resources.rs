@@ -1,5 +1,5 @@
 use crate::{
-    ExtractedAtmosphere, GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium,
+    Bluenoise, ExtractedAtmosphere, GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium,
     ScatteringMediumSampler,
 };
 use bevy_asset::{load_embedded_asset, AssetId, Handle};
@@ -22,7 +22,7 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
     renderer::{RenderDevice, RenderQueue},
-    texture::{CachedTexture, TextureCache},
+    texture::{CachedTexture, GpuImage, TextureCache},
     view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
 };
 use bevy_shader::Shader;
@@ -123,6 +123,12 @@ impl AtmosphereBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // blue noise texture and sampler
+                    (
+                        14,
+                        texture_2d_array(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (15, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -189,6 +195,12 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (12, sampler(SamplerBindingType::Filtering)),
                     // view depth texture
                     (13, texture_2d(TextureSampleType::Depth)),
+                    // blue noise texture and sampler
+                    (
+                        14,
+                        texture_2d_array(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (15, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -215,6 +227,12 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (12, sampler(SamplerBindingType::Filtering)),
                     // view depth texture
                     (13, texture_2d_multisampled(TextureSampleType::Depth)),
+                    // blue noise texture and sampler
+                    (
+                        14,
+                        texture_2d_array(TextureSampleType::Float { filterable: true }),
+                    ),
+                    (15, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -609,8 +627,10 @@ pub(super) fn prepare_atmosphere_bind_groups(
     atmosphere_uniforms: Res<ComponentUniforms<GpuAtmosphere>>,
     settings_uniforms: Res<ComponentUniforms<GpuAtmosphereSettings>>,
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
+    render_images: Res<RenderAssets<GpuImage>>,
     medium_sampler: Res<ScatteringMediumSampler>,
     pipeline_cache: Res<PipelineCache>,
+    bluenoise: Res<Bluenoise>,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
     if views.iter().len() == 0 {
@@ -639,6 +659,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
         .view_gpu_lights
         .binding()
         .ok_or(AtmosphereBindGroupError::LightUniforms)?;
+
+    let bluenoise_image = render_images.get(&bluenoise.texture).expect("TODO: Error");
 
     for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
         let gpu_medium = gpu_media
@@ -700,11 +722,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // sky view lut storage texture
                 (13, &textures.sky_view_lut.default_view),
+                (14, &bluenoise_image.texture_view),
+                (15, &bluenoise_image.sampler),
             )),
         );
 
         let aerial_view_lut = render_device.create_bind_group(
-            "sky_view_lut_bind_group",
+            "aerial_view_lut_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.aerial_view_lut),
             &BindGroupEntries::with_indices((
                 // uniforms
@@ -751,6 +775,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // view depth texture
                 (13, view_depth_texture.view()),
+                (14, &bluenoise_image.texture_view),
+                (15, &bluenoise_image.sampler),
             )),
         );
 

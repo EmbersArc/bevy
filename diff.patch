@@ -1,0 +1,179 @@
+diff --git a/crates/bevy_pbr/src/atmosphere/bindings.wgsl b/crates/bevy_pbr/src/atmosphere/bindings.wgsl
+index 5c8fc8113..38295daac 100644
+--- a/crates/bevy_pbr/src/atmosphere/bindings.wgsl
++++ b/crates/bevy_pbr/src/atmosphere/bindings.wgsl
+@@ -22,3 +22,5 @@
+ @group(0) @binding(10) var sky_view_lut: texture_2d<f32>;
+ @group(0) @binding(11) var aerial_view_lut: texture_3d<f32>;
+ @group(0) @binding(12) var atmosphere_lut_sampler: sampler;
++@group(0) @binding(14) var blue_noise_texture: texture_2d_array<f32>;
++@group(0) @binding(15) var blue_noise_sampler: sampler;
+\ No newline at end of file
+diff --git a/crates/bevy_pbr/src/atmosphere/functions.wgsl b/crates/bevy_pbr/src/atmosphere/functions.wgsl
+index bd57a0ee8..7c18792d6 100644
+--- a/crates/bevy_pbr/src/atmosphere/functions.wgsl
++++ b/crates/bevy_pbr/src/atmosphere/functions.wgsl
+@@ -7,7 +7,8 @@
+     bindings::{
+         atmosphere, settings, view, lights, transmittance_lut, atmosphere_lut_sampler,
+         multiscattering_lut, sky_view_lut, aerial_view_lut, atmosphere_transforms, 
+-        medium_density_lut, medium_scattering_lut, medium_sampler,
++        medium_density_lut, medium_scattering_lut, medium_sampler, blue_noise_texture,
++        blue_noise_sampler
+     },
+     bruneton_functions::{
+         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
+@@ -428,7 +429,7 @@ fn raymarch_atmosphere(
+     t_max: f32,
+     max_samples: u32,
+     uv: vec2<f32>,
+-    ground: bool
++    ground: bool,
+ ) -> RaymarchResult {
+     let r = length(pos);
+     let up = normalize(pos);
+@@ -448,6 +449,10 @@ fn raymarch_atmosphere(
+     result.inscattering = vec3(0.0);
+     result.transmittance = vec3(1.0);
+ 
++    let pixel_coords = vec2u(uv * view.viewport.wz);
++    // TODO: Incorporate MIDPOINT_RATIO
++    let sample_offset = sample_noise(pixel_coords);
++
+     // Skip if invalid segment
+     if t_total <= 0.0 {
+         return result;
+@@ -457,7 +462,7 @@ fn raymarch_atmosphere(
+     var optical_depth = vec3(0.0);
+     for (var s = 0.0; s < sample_count; s += 1.0) {
+         // Linear distribution from atmosphere entry to exit/ground
+-        let t_i = t_start + t_total * (s + MIDPOINT_RATIO) / sample_count;
++        let t_i = t_start + t_total * (s + sample_offset) / sample_count;
+         let dt_i = (t_i - prev_t);
+         prev_t = t_i;
+ 
+@@ -509,3 +514,20 @@ fn raymarch_atmosphere(
+ 
+     return result;
+ }
++
++// TODO: Add HAS_BLUE_NOISE
++// #ifdef HAS_BLUE_NOISE
++fn sample_noise(pixel_coords: vec2u) -> f32 {
++    let dimensions = textureDimensions(blue_noise_texture);
++    let noise_size_bits = countTrailingZeros(dimensions.xy);
++    let noise_size = vec2u(1) << noise_size_bits;
++    let noise_size_mask = noise_size - vec2u(1u);
++    let noise_coords = pixel_coords & noise_size_mask;
++    let uv = vec2f(noise_coords) / vec2f(noise_size);
++    return textureSampleLevel(blue_noise_texture, blue_noise_sampler, uv, 0u, 0.0).x;
++}
++// #else
++// fn sample_noise(pixel_coords: vec2u) -> f32 {
++//     return 0.5;
++// }
++// #endif
+\ No newline at end of file
+diff --git a/crates/bevy_pbr/src/atmosphere/resources.rs b/crates/bevy_pbr/src/atmosphere/resources.rs
+index 1d2657d09..c1adda2ec 100644
+--- a/crates/bevy_pbr/src/atmosphere/resources.rs
++++ b/crates/bevy_pbr/src/atmosphere/resources.rs
+@@ -1,5 +1,5 @@
+ use crate::{
+-    ExtractedAtmosphere, GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium,
++    Bluenoise, ExtractedAtmosphere, GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium,
+     ScatteringMediumSampler,
+ };
+ use bevy_asset::{load_embedded_asset, AssetId, Handle};
+@@ -22,7 +22,7 @@ use bevy_render::{
+     render_asset::RenderAssets,
+     render_resource::{binding_types::*, *},
+     renderer::{RenderDevice, RenderQueue},
+-    texture::{CachedTexture, TextureCache},
++    texture::{CachedTexture, GpuImage, TextureCache},
+     view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+ };
+ use bevy_shader::Shader;
+@@ -123,6 +123,12 @@ impl AtmosphereBindGroupLayouts {
+                             StorageTextureAccess::WriteOnly,
+                         ),
+                     ),
++                    // blue noise texture and sampler
++                    (
++                        14,
++                        texture_2d_array(TextureSampleType::Float { filterable: true }),
++                    ),
++                    (15, sampler(SamplerBindingType::Filtering)),
+                 ),
+             ),
+         );
+@@ -189,6 +195,12 @@ impl FromWorld for RenderSkyBindGroupLayouts {
+                     (12, sampler(SamplerBindingType::Filtering)),
+                     // view depth texture
+                     (13, texture_2d(TextureSampleType::Depth)),
++                    // blue noise texture and sampler
++                    (
++                        14,
++                        texture_2d_array(TextureSampleType::Float { filterable: true }),
++                    ),
++                    (15, sampler(SamplerBindingType::Filtering)),
+                 ),
+             ),
+         );
+@@ -215,6 +227,12 @@ impl FromWorld for RenderSkyBindGroupLayouts {
+                     (12, sampler(SamplerBindingType::Filtering)),
+                     // view depth texture
+                     (13, texture_2d_multisampled(TextureSampleType::Depth)),
++                    // blue noise texture and sampler
++                    (
++                        14,
++                        texture_2d_array(TextureSampleType::Float { filterable: true }),
++                    ),
++                    (15, sampler(SamplerBindingType::Filtering)),
+                 ),
+             ),
+         );
+@@ -609,8 +627,10 @@ pub(super) fn prepare_atmosphere_bind_groups(
+     atmosphere_uniforms: Res<ComponentUniforms<GpuAtmosphere>>,
+     settings_uniforms: Res<ComponentUniforms<GpuAtmosphereSettings>>,
+     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
++    render_images: Res<RenderAssets<GpuImage>>,
+     medium_sampler: Res<ScatteringMediumSampler>,
+     pipeline_cache: Res<PipelineCache>,
++    bluenoise: Res<Bluenoise>,
+     mut commands: Commands,
+ ) -> Result<(), BevyError> {
+     if views.iter().len() == 0 {
+@@ -640,6 +660,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
+         .binding()
+         .ok_or(AtmosphereBindGroupError::LightUniforms)?;
+ 
++    let bluenoise_image = render_images.get(&bluenoise.texture).expect("TODO: Error");
++
+     for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
+         let gpu_medium = gpu_media
+             .get(atmosphere.medium)
+@@ -700,11 +722,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
+                 (12, &**atmosphere_sampler),
+                 // sky view lut storage texture
+                 (13, &textures.sky_view_lut.default_view),
++                (14, &bluenoise_image.texture_view),
++                (15, &bluenoise_image.sampler),
+             )),
+         );
+ 
+         let aerial_view_lut = render_device.create_bind_group(
+-            "sky_view_lut_bind_group",
++            "aerial_view_lut_bind_group",
+             &pipeline_cache.get_bind_group_layout(&layouts.aerial_view_lut),
+             &BindGroupEntries::with_indices((
+                 // uniforms
+@@ -751,6 +775,8 @@ pub(super) fn prepare_atmosphere_bind_groups(
+                 (12, &**atmosphere_sampler),
+                 // view depth texture
+                 (13, view_depth_texture.view()),
++                (14, &bluenoise_image.texture_view),
++                (15, &bluenoise_image.sampler),
+             )),
+         );
+ 

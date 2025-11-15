@@ -7,7 +7,8 @@
     bindings::{
         atmosphere, settings, view, lights, transmittance_lut, atmosphere_lut_sampler,
         multiscattering_lut, sky_view_lut, aerial_view_lut, atmosphere_transforms, 
-        medium_density_lut, medium_scattering_lut, medium_sampler,
+        medium_density_lut, medium_scattering_lut, medium_sampler, blue_noise_texture,
+        blue_noise_sampler
     },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, transmittance_lut_uv_to_r_mu, 
@@ -428,7 +429,7 @@ fn raymarch_atmosphere(
     t_max: f32,
     max_samples: u32,
     uv: vec2<f32>,
-    ground: bool
+    ground: bool,
 ) -> RaymarchResult {
     let r = length(pos);
     let up = normalize(pos);
@@ -448,6 +449,10 @@ fn raymarch_atmosphere(
     result.inscattering = vec3(0.0);
     result.transmittance = vec3(1.0);
 
+    let pixel_coords = vec2u(uv * view.viewport.wz);
+    // TODO: Incorporate MIDPOINT_RATIO
+    let sample_offset = sample_noise(pixel_coords);
+
     // Skip if invalid segment
     if t_total <= 0.0 {
         return result;
@@ -457,7 +462,7 @@ fn raymarch_atmosphere(
     var optical_depth = vec3(0.0);
     for (var s = 0.0; s < sample_count; s += 1.0) {
         // Linear distribution from atmosphere entry to exit/ground
-        let t_i = t_start + t_total * (s + MIDPOINT_RATIO) / sample_count;
+        let t_i = t_start + t_total * (s + sample_offset) / sample_count;
         let dt_i = (t_i - prev_t);
         prev_t = t_i;
 
@@ -509,3 +514,20 @@ fn raymarch_atmosphere(
 
     return result;
 }
+
+// TODO: Add HAS_BLUE_NOISE
+// #ifdef HAS_BLUE_NOISE
+fn sample_noise(pixel_coords: vec2u) -> f32 {
+    let dimensions = textureDimensions(blue_noise_texture);
+    let noise_size_bits = countTrailingZeros(dimensions.xy);
+    let noise_size = vec2u(1) << noise_size_bits;
+    let noise_size_mask = noise_size - vec2u(1u);
+    let noise_coords = pixel_coords & noise_size_mask;
+    let uv = vec2f(noise_coords) / vec2f(noise_size);
+    return textureSampleLevel(blue_noise_texture, blue_noise_sampler, uv, 0u, 0.0).x;
+}
+// #else
+// fn sample_noise(pixel_coords: vec2u) -> f32 {
+//     return 0.5;
+// }
+// #endif
