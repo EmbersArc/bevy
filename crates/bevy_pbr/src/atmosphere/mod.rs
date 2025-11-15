@@ -235,6 +235,10 @@ pub struct Atmosphere {
     /// A handle to a [`ScatteringMedium`], which describes the substance
     /// of the atmosphere and how it scatters light.
     pub medium: Handle<ScatteringMedium>,
+
+    /// Position of the planet in world coordinates, e.g. for a y-up world
+    /// frame this can just be (0.0, -bottom_radius, 0.0).
+    pub world_position: Vec3,
 }
 
 impl Atmosphere {
@@ -247,6 +251,7 @@ impl Atmosphere {
             top_radius: EARTH_TOP_RADIUS,
             ground_albedo: EARTH_ALBEDO,
             medium,
+            world_position: Vec3::ZERO,
         }
     }
 }
@@ -264,6 +269,7 @@ impl ExtractComponent for Atmosphere {
             top_radius: item.top_radius,
             ground_albedo: item.ground_albedo,
             medium: item.medium.id(),
+            world_position: item.world_position,
         })
     }
 }
@@ -276,6 +282,7 @@ pub struct ExtractedAtmosphere {
     pub top_radius: f32,
     pub ground_albedo: Vec3,
     pub medium: AssetId<ScatteringMedium>,
+    pub world_position: Vec3,
 }
 
 /// This component controls the resolution of the atmosphere LUTs, and
